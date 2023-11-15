@@ -1,0 +1,172 @@
+<html>
+
+<head>
+    <title>Simple COG on MapLibre GL JS</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="https://unpkg.com/maplibre-gl@2.4.0/dist/maplibre-gl.js"></script>
+    <link href="https://unpkg.com/maplibre-gl@2.4.0/dist/maplibre-gl.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/geotiff"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+        }
+
+        #map {
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            width: 100%;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="map"></div>
+    <script type="module">
+        // 'GeoTIFF'パッケージから 'fromUrl' と 'Pool' 関数をインポート
+        const { fromUrl, Pool } = GeoTIFF;
+
+        // 'fast-png'パッケージから'encode'関数をインポート。これは画像データをPNG形式にエンコードするために使用。
+        import { encode as fastPngEncode } from 'https://cdn.jsdelivr.net/npm/fast-png@6.1.0/+esm';
+
+        // タイルのx/y/z座標をWebメルカトルの境界ボックスに変換する関数を定義
+        const merc = (x, y, z) => {
+            const GEO_R = 6378137;
+            const orgX = -1 * ((2 * GEO_R * Math.PI) / 2);
+            const orgY = (2 * GEO_R * Math.PI) / 2;
+            const unit = (2 * GEO_R * Math.PI) / Math.pow(2, z);
+            const minx = orgX + x * unit;
+            const maxx = orgX + (x + 1) * unit;
+            const miny = orgY - (y + 1) * unit;
+            const maxy = orgY - y * unit;
+            return [minx, miny, maxx, maxy];
+        };
+
+        // Cloud Optimized GeoTIFF(COG)ソースを生成する非同期関数を定義
+        const generateCogSource = async (url) => {
+            // GeoTIFFから指定されたURLの画像を読み込み
+            const tiff = await fromUrl(url);
+            const pool = new Pool();
+            maplibregl.addProtocol('cog', (params, callback) => {
+                const segments = params.url.split('/');
+                console.log('segments:' + segments);
+                // タイルインデックスの取得
+                const [z, x, y] = segments.slice(segments.length - 3).map(Number);
+                // webmercator-bboxを取得
+                const bbox = merc(x, y, z);
+                // 画像のサイズを指定
+                const size = 256;
+                // GeoTIFFから特定の境界ボックス(bbox)内のラスターデータを読み込み
+                tiff.readRasters({
+                    bbox,
+                    samples: [0, 1, 2, 3], // 4つのバンド（赤、緑、青、アルファ）を取得する
+                    width: size,  // 読み込む画像のサイズを指定
+                    height: size, // 読み込む画像のサイズを指定
+                    interleave: true, // バンドを交互に読み込む
+                    pool, // 並列処理のためのワーカープールを指定
+                }).then((data) => {
+                    const img = new ImageData(
+                        //@ts-ignore
+                        new Uint8ClampedArray(data),
+                        size,
+                        size,
+                    );
+                    // imgデータをPNG形式にエンコード
+                    const png = fastPngEncode(img);
+                    callback(null, png, null, null);
+                });
+                return { cancel: () => { } };
+            });
+
+            // RasterSourceSpecificationに対応するソースオブジェクトを生成
+            const source = {
+                type: 'raster',
+                tiles: [`cog://${url.split('://')[1]}/{z}/{x}/{y}`],
+                tileSize: 256,
+                minzoom: 2,
+                maxzoom: 18,
+                attribution: '<a href="https://www.geospatial.jp/ckan/dataset/aac-2021710-atami-lp">G空間情報センター 2021年7月10日静岡県熱海市土石流災害航空レーザ計測データ他(CC By 4.0)</a>'
+            };
+
+            return { source };
+        };
+
+        // マップを初期化
+        const map = new maplibregl.Map({
+            container: 'map',
+            style: {
+                version: 8,
+                sources: {
+                    osm: {
+                        type: 'raster',
+                        tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+                        attribution:
+                            '<a href="http://osm.org/copyright">OpenStreetMap contributors</a>',
+                    },
+                },
+                layers: [
+                    {
+                        id: 'osm',
+                        type: 'raster',
+                        source: 'osm',
+                    },
+                ],
+            },
+            hash: true,
+            zoom: 17,
+            center: [139.073147, 35.12128],
+            pitch: 0,
+            bearing: 0,
+            attributionControl: false,
+        });
+
+
+        // ズーム・回転
+        map.addControl(new maplibregl.NavigationControl());
+
+        // フルスクリーンモードのオンオフ
+        map.addControl(new maplibregl.FullscreenControl());
+
+        // 現在位置表示
+        map.addControl(new maplibregl.GeolocateControl({
+            positionOptions: {
+                enableHighAccuracy: false
+            },
+            fitBoundsOptions: { maxZoom: 18 },
+            trackUserLocation: true,
+            showUserLocation: true
+        }));
+
+        // スケール表示
+        map.addControl(new maplibregl.ScaleControl({
+            maxWidth: 200,
+            unit: 'metric'
+        }));
+
+        // Attributionを折りたたみ表示
+        map.addControl(new maplibregl.AttributionControl({
+            compact: true,
+            customAttribution: '（<a href="https://twitter.com/shi__works" target="_blank">Twitter</a> | <a href="" target="_blank">Github</a>） '
+        }));
+
+        // マップのロードが完了したら、COGソースを生成しレイヤーに追加
+        map.on('load', async () => {
+            const { source } = await generateCogSource(
+                './08NF2340_AC_cog.tif'
+            );
+            map.addSource('cogSample', source);
+            map.addLayer({
+                id: 'cogLayer',
+                type: 'raster',
+                source: 'cogSample',
+            });
+        });
+
+        map.showTileBoundaries = true;
+
+    </script>
+</body>
+
+</html>
